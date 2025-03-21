@@ -76,7 +76,11 @@ WSGI_APPLICATION = 'timespace_be.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'NAME': 'postgres',
+        'USER': 'postgres.tbymrebzmgbidchigdlc',
+        'PASSWORD': 'YunGus59SeanCyr',
+        'HOST': 'aws-0-ap-southeast-2.pooler.supabase.com',
+        'PORT': '5432',
     }
 }
 
