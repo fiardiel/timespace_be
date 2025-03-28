@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Image Records</title>
+</head>
+<body>
+    <h1>Image Records</h1>
+    {% if records %}
+        <ul>
+            {% for record in records %}
+                <li>
+                    <strong>File:</strong> {{ record.file_name }}<br>
+                    <strong>Event:</strong> {{ record.event }}<br>
+                    <strong>People:</strong> {{ record.people }}
+                    <img src="https://tbymrebzmgbidchigdlc.supabase.co/storage/v1/object/public/timespace/{{ record.file_name }}" alt="{{ record.event }}">
+                </li>
+            {% endfor %}
+        </ul>
+    {% else %}
+        <p>No records found.</p>
+    {% endif %}
+</body>
+</html>
