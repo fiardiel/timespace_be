@@ -75,8 +75,8 @@ WSGI_APPLICATION = 'timespace_be.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': 'postgres',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': 'postgres',  # Or your actual DB name
         'USER': 'postgres.tbymrebzmgbidchigdlc',
         'PASSWORD': 'YunGus59SeanCyr',
         'HOST': 'aws-0-ap-southeast-2.pooler.supabase.com',
