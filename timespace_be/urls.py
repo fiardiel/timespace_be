@@ -17,9 +17,15 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import include, path
 from django.views.generic import RedirectView
+from rest_framework.routers import DefaultRouter
+from api.views import ImageRecordViewSet
+
+router = DefaultRouter()
+router.register(r'imagerecords', ImageRecordViewSet, basename='imagerecord')
 
 urlpatterns = [
-    path('admin/', admin.site.urls),
-    path('', include('authentication.urls')),
-    path('', RedirectView.as_view(url='imagerecords/')),
+    path('admin/',   admin.site.urls),
+    path('',         include('authentication.urls')),
+    path('api/',     include(router.urls)),
+    path('',         RedirectView.as_view(url='api/imagerecords/')),  # redirect root to your API
 ]
