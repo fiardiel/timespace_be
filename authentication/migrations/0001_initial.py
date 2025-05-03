@@ -12,13 +12,16 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.CreateModel(
-            name='ImageRecord',
+            name='Imagerecord',
             fields=[
                 ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('title', models.CharField(max_length=200)),
-                ('description', models.TextField(blank=True)),
-                ('image', models.ImageField(upload_to='uploads/')),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
+                ('file_name', models.TextField()),
+                ('event', models.TextField()),
+                ('people', models.JSONField()),
             ],
+            options={
+                'db_table': 'imagerecord',
+                'managed': False,
+            },
         ),
     ]

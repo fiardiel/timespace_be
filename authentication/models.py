@@ -1,4 +1,5 @@
 from django.db import models
+from django.contrib.auth.models import AbstractUser
 
 class Imagerecord(models.Model):
     file_name = models.TextField()
