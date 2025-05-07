@@ -1,8 +1,9 @@
 # api/views.py
-from rest_framework.viewsets import ModelViewSet
-from api.models                   import ImageRecord
-from api.serializers              import ImageRecordSerializer
+from rest_framework import viewsets
+from .models import ImageRecord
+from .serializers import ImageRecordSerializer
 
-class ImageRecordViewSet(ModelViewSet):
+class ImageRecordViewSet(viewsets.ModelViewSet):
     queryset         = ImageRecord.objects.all()
     serializer_class = ImageRecordSerializer
+

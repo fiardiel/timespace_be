@@ -27,5 +27,6 @@ urlpatterns = [
     path('admin/',   admin.site.urls),
     path('',         include('authentication.urls')),
     path('api/',     include(router.urls)),
+    path('api/', include('api.urls')),
     path('',         RedirectView.as_view(url='api/imagerecords/')),  # redirect root to your API
 ]
