@@ -23,7 +23,7 @@ from rest_framework_simplejwt.views import (
     TokenObtainPairView,
     TokenRefreshView,
 )
-from authentication.views import Register
+from authentication.views import Register, ValidateTokenView
 
 router = DefaultRouter()
 router.register(r'imagerecords', ImageRecordViewSet, basename='imagerecord')
@@ -36,4 +36,5 @@ urlpatterns = [
     path('api/login/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('api/auth/register/', Register.as_view(), name='register'),
+    path('api/auth/validate/', ValidateTokenView.as_view(), name='validate'),
 ]

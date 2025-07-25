@@ -19,3 +19,9 @@ class Register(APIView):
             serializer.is_valid(raise_exception=True)
             serializer.save()
             return Response(serializer.data, status=201)
+
+class ValidateTokenView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        return Response({"detail": "Token is valid."}, status=status.HTTP_200_OK)
