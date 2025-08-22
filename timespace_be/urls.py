@@ -37,4 +37,5 @@ urlpatterns = [
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('api/auth/register/', Register.as_view(), name='register'),
     path('api/auth/validate/', ValidateTokenView.as_view(), name='validate'),
+    path("api/facetrack/", include("facetrack.urls")),
 ]
