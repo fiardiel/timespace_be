@@ -8,6 +8,9 @@ import requests
 from django.conf import settings
 from django.db import connection
 
+import json
+from typing import List, Dict
+
 
 # allow clearing either folder safely
 ALLOWED_CLEAR_DIRS = {"PeopleFromDataBase", "GroupPhotoFromFE"}
@@ -40,6 +43,13 @@ def _safe_empty_dir(path: Path):
 
 def _slugify(name: str) -> str:
     return re.sub(r"[^a-z0-9_]+", "_", (name or "").lower()).strip("_") or "file"
+
+
+def first_image_in_dir(dir_path: Path, exts=(".jpg", ".jpeg", ".png", ".bmp", ".webp")) -> Path | None:
+    if not dir_path.exists() or not dir_path.is_dir():
+        return None
+    files = sorted(p for p in dir_path.iterdir() if p.is_file() and p.suffix.lower() in exts)
+    return files[0] if files else None
 
 
 def download_last_group_photo(clear_first: bool = True):
@@ -131,3 +141,44 @@ def download_base_images(clear_first: bool = True, also_download_group: bool = T
             pass
 
     return downloaded
+
+import json
+from typing import List, Dict
+
+def _pretty_person_key(name: str) -> str:
+    """
+    Convert model/filename-style keys ('lei_wang', 'lei-wang', 'lei wang')
+    → Pretty format used in imagerecord.people ('Lei-Wang').
+    Rules:
+      - normalize to lower
+      - treat underscores/spaces as hyphens
+      - Title-Case each segment, join with '-'
+    """
+    if not name:
+        return ""
+    name = name.strip().lower().replace("_", "-").replace(" ", "-")
+    parts = [p for p in name.split("-") if p]
+    return "-".join(s[:1].upper() + s[1:] for s in parts)
+
+def upsert_latest_imagerecord_people(found_names: List[str]) -> Dict:
+    """
+    Rewrite `people` for the latest imagerecord (highest id) using the format {PrettyName: true}.
+    Returns info about what was written and which row was updated.
+    """
+    # Build {"Pretty-Name": true, ...}
+    people_map = {_pretty_person_key(n): True for n in (found_names or []) if _pretty_person_key(n)}
+
+    with connection.cursor() as cur:
+        cur.execute("SELECT id FROM public.imagerecord ORDER BY id DESC LIMIT 1;")
+        row = cur.fetchone()
+        if not row:
+            return {"updated": False, "reason": "No rows in public.imagerecord", "people": people_map}
+
+        imagerecord_id = row[0]
+        cur.execute(
+            "UPDATE public.imagerecord SET people = %s::jsonb WHERE id = %s;",
+            [json.dumps(people_map), imagerecord_id],
+        )
+        updated = cur.rowcount == 1
+
+    return {"updated": updated, "imagerecord_id": imagerecord_id, "people": people_map}

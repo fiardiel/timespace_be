@@ -20,7 +20,7 @@ from tensorflow.keras.models import load_model
 # --- Configuration ---
 MIN_SIZE    = 112                    # smallest face side we'll accept
 THRESHOLD   = 0.4                    # max cosine distance for a “match”
-MODEL_PATH  = "inception_model.keras"  # path to your saved Keras model
+MODEL_PATH = Path(__file__).resolve().parent / "inception_model.keras"  # path to your saved Keras model
 
 # Load your embedding model once
 embedder = load_model(MODEL_PATH)
@@ -70,6 +70,7 @@ def get_embedding(img_path: Path) -> np.ndarray:
     - Loads an image, resizes to the model's input size,
       normalizes pixels, and returns the embedding vector.
     """
+
     img_bgr = cv2.imread(str(img_path))
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
@@ -188,21 +189,34 @@ def find_people_in_group_simple(
     return json.dumps(response, indent=2)
 
 
+def first_image_in_dir(dir_path: Path, exts=(".jpg", ".jpeg", ".png", ".bmp", ".webp")) -> Path | None:
+    if not dir_path.exists() or not dir_path.is_dir():
+        return None
+    files = sorted(p for p in dir_path.iterdir() if p.is_file() and p.suffix.lower() in exts)
+    return files[0] if files else None
 
 if __name__ == "__main__":
-    base_dir       = Path(__file__).resolve().parent
-    group_img      = base_dir / "avengersGroup" / "group1.png"
-    person_dir     = base_dir / "avengersTest"
+    base_dir   = Path(__file__).resolve().parent
+    group_dir  = base_dir / "GroupPhotoFromFE"
+    person_dir = base_dir / "PeopleFromDataBase"
 
+    group_img = first_image_in_dir(group_dir)
+    if group_img is None:
+        print(f"[!] No group photo found in: {group_dir}")
+        print("    Make sure you ran the endpoint that downloads the latest group photo.")
+        raise SystemExit(1)
+
+    print(f"Using group image: {group_img}")
     result_json = find_people_in_group_simple(group_img, person_dir)
     result = json.loads(result_json)
 
     print("\n=== Summary: People detected in group photo ===")
-    if result["status"] and result["found"]:
+    if result.get("status") and result.get("found"):
         for name in result["found"]:
             print(f"- {name}")
     else:
         print("No known persons detected.")
+
 
 
 
