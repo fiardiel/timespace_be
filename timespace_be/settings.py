@@ -19,11 +19,17 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
-DB_HOST     = os.getenv("DB_HOST", "").strip()
+DB_HOST     = os.getenv("DB_HOST", "aws-0-ap-southeast-2.pooler.supabase.com").strip()
 DB_PORT     = os.getenv("DB_PORT", "6543").strip()
 DB_NAME     = os.getenv("DB_NAME", "postgres").strip()
 DB_USER     = os.getenv("DB_USER", "").strip()
+DB_SSLMODE = os.getenv("DB_SSLMODE", "require").strip()
 DB_PASSWORD = os.getenv("DB_PASSWORD", "").strip()
+DB_OPTIONS = os.getenv("DB_OPTIONS", "").strip()
+
+_db_opts = {"sslmode": DB_SSLMODE}
+if DB_OPTIONS:
+    _db_opts["options"] = DB_OPTIONS  # e.g. "-c search_path=public"
 
 DATABASES = {
     "default": {
@@ -33,6 +39,7 @@ DATABASES = {
         "PASSWORD": DB_PASSWORD,
         "HOST": DB_HOST,
         "PORT": DB_PORT,
+        "OPTIONS": _db_opts,
     }
 }
 

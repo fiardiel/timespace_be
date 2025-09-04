@@ -1,6 +1,6 @@
 from django.urls import path
-from .views import FindOnePersonUploadView
+from . import views
 
 urlpatterns = [
-    path("find-one-upload/", FindOnePersonUploadView.as_view(), name="find_one_upload"),
+    path("fetch-base-images/", views.fetch_base_images, name="fetch_base_images"),
 ]
