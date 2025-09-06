@@ -2,10 +2,15 @@
 from django.db import models
 
 class ImageRecord(models.Model):
-    title       = models.CharField(max_length=200)
-    description = models.TextField(blank=True)
-    image       = models.ImageField(upload_to="uploads/")
-    created_at  = models.DateTimeField(auto_now_add=True)
+    file_name  = models.TextField()
+    event      = models.TextField()
+    people     = models.JSONField()
 
-    def __str__(self):
-        return self.title
+    class Meta:
+        managed = False
+        db_table = 'imagerecord'
+
+    @property
+    def image_url(self):
+        prefix = "https://tbymrebzmgbidchigdlc.supabase.co/storage/v1/object/public/timespace/"
+        return f"{prefix}{self.file_name}"
