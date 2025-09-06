@@ -19,6 +19,11 @@ from django.urls import include, path
 from django.views.generic import RedirectView
 from rest_framework.routers import DefaultRouter
 from api.views import ImageRecordViewSet
+from rest_framework_simplejwt.views import (
+    TokenObtainPairView,
+    TokenRefreshView,
+)
+from authentication.views import Register, ValidateTokenView
 
 router = DefaultRouter()
 router.register(r'imagerecords', ImageRecordViewSet, basename='imagerecord')
@@ -29,4 +34,9 @@ urlpatterns = [
     path('api/',     include(router.urls)),
     path('api/', include('api.urls')),
     path('',         RedirectView.as_view(url='api/imagerecords/')),  # redirect root to your API
+    path('api/login/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('api/auth/register/', Register.as_view(), name='register'),
+    path('api/auth/validate/', ValidateTokenView.as_view(), name='validate'),
+    path("facetrack/", include("facetrack.urls")),
 ]

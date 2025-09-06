@@ -11,10 +11,37 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
 from pathlib import Path
+from datetime import timedelta
+import os
+from pathlib import Path
+from dotenv import load_dotenv
 
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
 
+DB_HOST     = os.getenv("DB_HOST", "aws-0-ap-southeast-2.pooler.supabase.com").strip()
+DB_PORT     = os.getenv("DB_PORT", "6543").strip()
+DB_NAME     = os.getenv("DB_NAME", "postgres").strip()
+DB_USER     = os.getenv("DB_USER", "").strip()
+DB_SSLMODE = os.getenv("DB_SSLMODE", "require").strip()
+DB_PASSWORD = os.getenv("DB_PASSWORD", "").strip()
+DB_OPTIONS = os.getenv("DB_OPTIONS", "").strip()
+
+_db_opts = {"sslmode": DB_SSLMODE}
+if DB_OPTIONS:
+    _db_opts["options"] = DB_OPTIONS  # e.g. "-c search_path=public"
+
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": DB_NAME,
+        "USER": DB_USER,
+        "PASSWORD": DB_PASSWORD,
+        "HOST": DB_HOST,
+        "PORT": DB_PORT,
+        "OPTIONS": _db_opts,
+    }
+}
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/4.2/howto/deployment/checklist/
@@ -43,7 +70,20 @@ INSTALLED_APPS = [
     'corsheaders',
     'rest_framework',
     'api',
+    'rest_framework_simplejwt',
+    'person_class',
 ]
+
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
+}
+
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': (
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+    )
+}
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
@@ -83,18 +123,6 @@ WSGI_APPLICATION = 'timespace_be.wsgi.application'
 
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
-
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'postgres',  # Or your actual DB name
-        'USER': 'postgres.tbymrebzmgbidchigdlc',
-        'PASSWORD': 'YunGus59SeanCyr',
-        'HOST': 'aws-0-ap-southeast-2.pooler.supabase.com',
-        'PORT': '5432',
-    }
-}
-
 
 # Password validation
 # https://docs.djangoproject.com/en/4.2/ref/settings/#auth-password-validators
