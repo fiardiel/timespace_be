@@ -19,7 +19,7 @@ import keras
 
 # --- Configuration ---
 MIN_SIZE   = 112      # smallest face side we'll accept
-THRESHOLD  = 0.4      # max cosine distance for a “match”
+THRESHOLD  = 0.6      # max cosine distance for a “match”
 MARGIN_GAP = 0.05     # optional runner-up margin; set to 0 to disable
 MODEL_PATH = Path(__file__).resolve().parent / "inception_model.keras"  # your saved Keras 3 model
 
