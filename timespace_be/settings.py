@@ -18,6 +18,7 @@ from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
+STATIC_ROOT = BASE_DIR / "staticfiles"
 
 DB_HOST     = os.getenv("DB_HOST", "aws-0-ap-southeast-2.pooler.supabase.com").strip()
 DB_PORT     = os.getenv("DB_PORT", "6543").strip()

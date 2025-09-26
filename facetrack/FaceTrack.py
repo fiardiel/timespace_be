@@ -10,109 +10,148 @@ import json
 import time
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import cv2
 import numpy as np
 from mtcnn import MTCNN
-from tensorflow.keras.models import load_model
+import keras
 
 # --- Configuration ---
-MIN_SIZE    = 112                    # smallest face side we'll accept
-THRESHOLD   = 0.4                    # max cosine distance for a “match”
-MODEL_PATH = Path(__file__).resolve().parent / "inception_model.keras"  # path to your saved Keras model
+MIN_SIZE  = 112      # smallest face side we'll accept
+THRESHOLD = 0.4      # max cosine distance for a “match”
+MODEL_PATH = Path(__file__).resolve().parent / "inception_model.keras"  # your saved Keras 3 model
+
+# ---------- Model loading (Keras 3) ----------
+def _merge_two_feature_maps_if_needed(base: keras.Model) -> keras.Model:
+    """If the loaded model outputs two 4D tensors (N,H,W,C),
+    merge them -> GAP -> Dense head."""
+    outs = base.outputs if isinstance(base.outputs, (list, tuple)) else [base.outputs]
+    if len(outs) == 2 and getattr(outs[0].shape, "rank", None) == 4:
+        # Merge choice: Average (blend) or Concatenate (stack channels)
+        merged = keras.layers.Average(name="merge_avg")(outs)
+        x = keras.layers.GlobalAveragePooling2D(name="gap")(merged)
+        # Recreate a simple head (matches your earlier config)
+        x = keras.layers.Dense(128, activation="relu", name="dense")(x)
+        x = keras.layers.BatchNormalization(name="bn1")(x)
+        x = keras.layers.Dense(64, activation="relu", name="dense_1")(x)
+        x = keras.layers.BatchNormalization(name="bn2")(x)
+        x = keras.layers.Dense(32, activation="relu", name="dense_2")(x)
+        x = keras.layers.BatchNormalization(name="bn3")(x)
+        x = keras.layers.Dropout(0.3, name="dropout")(x)
+        out = keras.layers.Dense(5, activation="softmax", name="dense_3")(x)
+        return keras.Model(inputs=base.inputs, outputs=out, name="patched_model")
+    return base
+
+def load_face_model() -> keras.Model:
+    base = keras.saving.load_model(str(MODEL_PATH), compile=False, safe_mode=False)
+    return _merge_two_feature_maps_if_needed(base)
 
 # Load your embedding model once
-embedder = load_model(MODEL_PATH)
+from .model_loader import load_embedder
+
+# Load your embedding model once
+embedder: keras.Model = load_embedder()
+
 
 # Build the face detector once
 detector = MTCNN()
 
 
 def extract_faces(group_path: Path,
-                  out_dir:    Path,
-                  min_size:   int = MIN_SIZE) -> list[Path]:
+                  out_dir: Path,
+                  min_size: int = MIN_SIZE) -> list[Path]:
     """
     - Runs MTCNN on the group image
     - Saves each crop to out_dir/face_{i}.jpg
     - Upscales any face below min_size
-    - Returns a list of the saved face file Paths
+    - Returns a list of saved face Paths
     """
     out_dir.mkdir(exist_ok=True)
     img_bgr = cv2.imread(str(group_path))
+    if img_bgr is None:
+        return []
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
     detections = detector.detect_faces(img_rgb)
-    saved = []
+    saved: list[Path] = []
 
     for i, det in enumerate(detections):
-        x, y, w, h = det["box"]
+        x, y, w, h = det.get("box", [0, 0, 0, 0])
         x, y = max(0, x), max(0, y)
-        face = img_rgb[y : y + h, x : x + w]
+        face = img_rgb[y:y+h, x:x+w]
+        if face.size == 0:
+            continue
 
         # Upscale if too small
         if face.shape[0] < min_size or face.shape[1] < min_size:
-            face = cv2.resize(face, (min_size, min_size),
-                              interpolation=cv2.INTER_CUBIC)
+            face = cv2.resize(face, (min_size, min_size), interpolation=cv2.INTER_CUBIC)
 
         out_path = out_dir / f"face_{i}.jpg"
-        # save as BGR for cv2.imwrite
-        cv2.imwrite(str(out_path),
-                    cv2.cvtColor(face, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(str(out_path), cv2.cvtColor(face, cv2.COLOR_RGB2BGR))
         saved.append(out_path)
 
     print(f"Extracted {len(saved)} faces → {out_dir}")
     return saved
 
 
+def _model_input_hw(model: keras.Model) -> tuple[int, int]:
+    """Return (H, W) for the model input, supporting list/tuple input shapes."""
+    ishape = model.input_shape
+    if isinstance(ishape, (list, tuple)) and isinstance(ishape[0], (list, tuple)):
+        # e.g. [(None, 256, 256, 3), ...]
+        H, W = ishape[0][1], ishape[0][2]
+    elif isinstance(ishape, (list, tuple)):
+        # e.g. (None, 256, 256, 3)
+        H, W = ishape[1], ishape[2]
+    else:
+        # Fallback
+        H = W = 256
+    return int(H), int(W)
+
 def get_embedding(img_path: Path) -> np.ndarray:
     """
-    - Loads an image, resizes to the model's input size,
-      normalizes pixels, and returns the embedding vector.
+    - Loads image, resizes to model's input size,
+    - Returns embedding vector (1D)
+    NOTE: keep values as float32 in 0..255 (matches augmentation value_range).
     """
-
     img_bgr = cv2.imread(str(img_path))
+    if img_bgr is None:
+        raise RuntimeError(f"Failed to load image: {img_path}")
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-    # model expects square inputs
-    _, H, W, _ = embedder.input_shape
-    face = cv2.resize(img_rgb, (W, H), interpolation=cv2.INTER_CUBIC)
+    H, W = _model_input_hw(embedder)
+    face = cv2.resize(img_rgb, (W, H), interpolation=cv2.INTER_AREA)
 
-    face = face.astype("float32") / 255.0
-    face = np.expand_dims(face, axis=0)
-    emb  = embedder.predict(face)
-    return emb[0]  # return 1D vector
+    arr = face.astype("float32")  # keep 0..255
+    arr = np.expand_dims(arr, axis=0)
+    emb = embedder.predict(arr, verbose=0)
+    return np.ravel(emb[0])  # ensure 1D
 
 
 def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
     """Compute 1 - cosine_similarity(a, b)."""
-    return 1.0 - np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
+    denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-12
+    return 1.0 - float(np.dot(a, b) / denom)
 
 
 def verify_faces(face_paths: list[Path],
                  person_path: Path,
                  threshold: float = THRESHOLD) -> tuple[int, int]:
-    """
-    For each extracted face, compute its embedding vs. the person's embedding.
-    Returns (match_count, non_match_count).
-    """
+    """For each extracted face, compare embedding to the person's embedding."""
     person_emb = get_embedding(person_path)
     matches = 0
     misses  = 0
 
     for p in face_paths:
-        start     = time.time()
-        face_emb  = get_embedding(p)
-        dist      = cosine_distance(face_emb, person_emb)
-        is_match  = (dist <= threshold)
-        elapsed   = time.time() - start
-
-        print(f"  {p.name}: dist={dist:.3f}, match={is_match} ({elapsed:.2f}s)")
-
-        if is_match:
-            matches += 1
-        else:
-            misses  += 1
+        start = time.time()
+        face_emb = get_embedding(p)
+        dist     = cosine_distance(face_emb, person_emb)
+        ok       = (dist <= threshold)
+        elapsed  = time.time() - start
+        print(f"  {p.name}: dist={dist:.3f}, match={ok} ({elapsed:.2f}s)")
+        matches += int(ok)
+        misses  += int(not ok)
 
     return matches, misses
 
@@ -126,28 +165,20 @@ def find_people_in_group_simple(
     """
     Simplified version:
     - Requires only the group image path and person directory path.
-    - Uses a fixed extract_dir ("extracted_faces" folder in script directory).
-    - Keeps min_size and threshold constants.
+    - Uses a fixed extract_dir ("extracted_faces" folder near this script).
     - Returns a JSON string.
     """
-    # Use a constant directory for extracted faces
     extract_dir = Path(__file__).resolve().parent / "extracted_faces"
 
-    # --- Sanity checks ---
+    # Sanity checks
     if not group_img.is_file():
-        return json.dumps({
-            "status": "error",
-            "message": f"Missing group image: {group_img}"
-        })
+        return json.dumps({"status": False, "message": f"Missing group image: {group_img}"})
     if not person_directory.is_dir():
-        return json.dumps({
-            "status": "error",
-            "message": f"Missing person directory: {person_directory}"
-        })
+        return json.dumps({"status": False, "message": f"Missing person directory: {person_directory}"})
 
-    # --- Clear extract_dir ---
+    # Clear extracts
     if extract_dir.exists():
-        for f in extract_dir.iterdir():
+        for f in list(extract_dir.iterdir()):
             if f.is_file():
                 f.unlink()
     else:
@@ -165,35 +196,26 @@ def find_people_in_group_simple(
         person_path = person_directory / person_file
         if not person_path.is_file():
             continue
-
-        name_out = person_path.stem
-
         if verbose:
             print(f"\n-- {person_file} --")
         t, f = verify_faces(faces, person_path, threshold=THRESHOLD)
-
         if t > 0:
             if verbose:
                 print(f"=> **{person_file} FOUND** ({t} of {len(faces)} faces matched)")
-            found_people.append(name_out)
+            found_people.append(person_path.stem)
         else:
             if verbose:
                 print(f"=> {person_file} NOT found")
 
-    # Build JSON response
-    response = {
-        "status": True,
-        "found": found_people,
-        "total_faces": len(faces)
-    }
-    return json.dumps(response, indent=2)
+    return json.dumps({"status": True, "found": found_people, "total_faces": len(faces)}, indent=2)
 
 
-def first_image_in_dir(dir_path: Path, exts=(".jpg", ".jpeg", ".png", ".bmp", ".webp")) -> Path | None:
+def first_image_in_dir(dir_path: Path, exts=(".jpg", ".jpeg", ".png", ".bmp", ".webp")) -> Optional[Path]:
     if not dir_path.exists() or not dir_path.is_dir():
         return None
     files = sorted(p for p in dir_path.iterdir() if p.is_file() and p.suffix.lower() in exts)
     return files[0] if files else None
+
 
 if __name__ == "__main__":
     base_dir   = Path(__file__).resolve().parent
@@ -216,7 +238,4 @@ if __name__ == "__main__":
             print(f"- {name}")
     else:
         print("No known persons detected.")
-
-
-
 
