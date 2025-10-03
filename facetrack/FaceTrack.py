@@ -410,11 +410,11 @@ if __name__ == "__main__":
     """
     # Setup paths for demonstration
     base_dir = Path(__file__).resolve().parent
-    group_img = base_dir / "avengersGroup" / "robertTest2.jpg"
-    person_dir = base_dir / "avengersTest"
+    group_dir = base_dir / "GroupPhotoFromFE"
+    person_dir = base_dir / "PeopleFromDataBase"
 
     # Run the face recognition system
-    result_json = find_people_in_group_simple(group_img, person_dir)
+    result_json = find_people_in_group_simple(group_dir, person_dir)
     result = json.loads(result_json)
 
     # Display results
