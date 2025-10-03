@@ -1,639 +1,426 @@
 #!/usr/bin/env python3
 """
-FaceTrack.py
+FaceTrack.py - Face Detection and Recognition Module
 
-1) Extract faces from a group image using MTCNN.
-2) Upscale any tiny faces to 112×112.
-3) For each person image in Person/, verify all extracted faces via your custom Inception model.
+This module provides functionality for detecting and recognizing faces in group photos
+by comparing them against known individuals. It uses MTCNN for face detection and
+deep learning models for face recognition/verification.
+
+Main Features:
+1) Extract faces from group images using MTCNN face detector
+2) Automatically upscale small faces to ensure minimum resolution (112×112)
+3) Generate face embeddings using pre-trained deep learning models
+4) Verify extracted faces against known individuals using cosine similarity
+5) Return JSON results indicating which people were found in the group photo
+
+Typical Usage:
+    from pathlib import Path
+    import FaceTrack
+
+    group_image = Path("group_photo.jpg")
+    person_directory = Path("known_people/")
+
+    result = FaceTrack.find_people_in_group_simple(group_image, person_directory)
+    print(result)  # JSON string with identification results
+
+Author: TIME-Space Machine Learning Team
+Dependencies: opencv-python, numpy, tensorflow, mtcnn
 """
 import json
 import time
 import os
 from pathlib import Path
-from typing import List, Optional, Tuple, Dict
+from typing import List
 
 import cv2
 import numpy as np
 from mtcnn import MTCNN
-import keras
+from tensorflow.keras.models import load_model
 
-# --- Configuration ---
-MIN_SIZE   = 112      # smallest face side we'll accept
-THRESHOLD  = 0.6      # max cosine distance for a “match”
-MARGIN_GAP = 0.05     # optional runner-up margin; set to 0 to disable
-MODEL_PATH = Path(__file__).resolve().parent / "inception_model.keras"  # your saved Keras 3 model
+# --- Configuration Constants ---
+MIN_SIZE = 112  # Minimum face size in pixels (faces smaller than this are upscaled)
+THRESHOLD = 0.4  # Cosine distance threshold for face matching (lower = stricter)
+DEFAULT_MODEL_PATH = Path(__file__).resolve().parent / "inception_model.keras"
 
-# ---------- Model loading (Keras 3) ----------
-def _merge_two_feature_maps_if_needed(base: keras.Model) -> keras.Model:
-    """If the loaded model outputs two 4D tensors (N,H,W,C),
-    merge them -> GAP -> Dense head."""
-    outs = base.outputs if isinstance(base.outputs, (list, tuple)) else [base.outputs]
-    if len(outs) == 2 and getattr(outs[0].shape, "rank", None) == 4:
-        merged = keras.layers.Average(name="merge_avg")(outs)
-        x = keras.layers.GlobalAveragePooling2D(name="gap")(merged)
-        # Simple head (example only)
-        x = keras.layers.Dense(128, activation="relu", name="dense")(x)
-        x = keras.layers.BatchNormalization(name="bn1")(x)
-        x = keras.layers.Dense(64, activation="relu", name="dense_1")(x)
-        x = keras.layers.BatchNormalization(name="bn2")(x)
-        x = keras.layers.Dense(32, activation="relu", name="dense_2")(x)
-        x = keras.layers.BatchNormalization(name="bn3")(x)
-        x = keras.layers.Dropout(0.3, name="dropout")(x)
-        out = keras.layers.Dense(5, activation="softmax", name="dense_3")(x)
-        return keras.Model(inputs=base.inputs, outputs=out, name="patched_model")
-    return base
+# Global model cache to avoid reloading models multiple times
+_model_cache = {}
 
-def load_face_model() -> keras.Model:
-    base = keras.saving.load_model(str(MODEL_PATH), compile=False, safe_mode=False)
-    return _merge_two_feature_maps_if_needed(base)
-
-# Load your embedding model once
-from .model_loader import load_embedder
-embedder: keras.Model = load_embedder()
-
-# Build the face detector once
+# Initialize face detector (MTCNN) once at module level for efficiency
 detector = MTCNN()
+
+
+def get_model(model_name: str = "Inception"):
+    """
+    Lazy-load and return the requested face embedding model.
+
+    Models are cached after first load to improve performance. This function
+    supports loading different types of face recognition models for generating
+    face embeddings used in face verification.
+
+    Args:
+        model_name (str): Name of the model to load. Currently supports:
+            - "Inception" (default): Uses the default inception_model.keras
+            - "Facenet": Alternative model (currently maps to same file)
+
+    Returns:
+        tensorflow.keras.Model: Loaded and compiled face embedding model
+
+    Raises:
+        FileNotFoundError: If the specified model file doesn't exist
+
+    Example:
+        >>> model = get_model("Inception")
+        >>> # Model is now cached for subsequent calls
+        >>> same_model = get_model("Inception")  # Returns cached instance
+    """
+    if model_name in _model_cache:
+        return _model_cache[model_name]
+
+    # Map model names to file paths
+    if model_name.lower() == "facenet":
+        model_path = Path(__file__).resolve().parent / "inception_model.keras"
+    else:
+        model_path = DEFAULT_MODEL_PATH
+
+    if not Path(model_path).is_file():
+        raise FileNotFoundError(f"Embedding model not found at {model_path}")
+
+    model = load_model(str(model_path))
+    _model_cache[model_name] = model
+    return model
 
 
 def extract_faces(group_path: Path,
                   out_dir: Path,
                   min_size: int = MIN_SIZE) -> list[Path]:
     """
-    - Runs MTCNN on the group image
-    - Saves each crop to out_dir/face_{i}.jpg
-    - Upscales any face below min_size
-    - Returns a list of saved face Paths
+    Extract all faces from a group image using MTCNN face detection.
+
+    This function detects faces in the input image and saves each detected face
+    as a separate image file. Small faces are automatically upscaled to meet
+    the minimum size requirement for better recognition accuracy.
+
+    Args:
+        group_path (Path): Path to the input group image file
+        out_dir (Path): Directory where extracted face images will be saved
+        min_size (int): Minimum face size in pixels. Faces smaller than this
+                       will be upscaled using cubic interpolation
+
+    Returns:
+        list[Path]: List of paths to the saved face image files
+
+    Raises:
+        ValueError: If the input image cannot be read
+
+    Example:
+        >>> faces = extract_faces(Path("group.jpg"), Path("faces/"), min_size=112)
+        >>> print(f"Extracted {len(faces)} faces")
+        Extracted 3 faces → faces/
     """
     out_dir.mkdir(exist_ok=True)
     img_bgr = cv2.imread(str(group_path))
+
     if img_bgr is None:
-        return []
+        raise ValueError(f"Could not read image from {group_path}")
+
+    # Convert BGR to RGB for MTCNN (which expects RGB)
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
+    # Detect faces in the image
     detections = detector.detect_faces(img_rgb)
-    saved: list[Path] = []
+    saved = []
 
     for i, det in enumerate(detections):
-        x, y, w, h = det.get("box", [0, 0, 0, 0])
-        x, y = max(0, x), max(0, y)
-        face = img_rgb[y:y+h, x:x+w]
-        if face.size == 0:
-            continue
+        # Extract bounding box coordinates
+        x, y, w, h = det["box"]
+        x, y = max(0, x), max(0, y)  # Ensure coordinates are not negative
 
-        # Upscale if too small
+        # Crop the face from the image
+        face = img_rgb[y: y + h, x: x + w]
+
+        # Upscale small faces to minimum size for better recognition
         if face.shape[0] < min_size or face.shape[1] < min_size:
-            face = cv2.resize(face, (min_size, min_size), interpolation=cv2.INTER_CUBIC)
+            face = cv2.resize(face, (min_size, min_size),
+                              interpolation=cv2.INTER_CUBIC)
 
+        # Save the face image (convert back to BGR for saving)
         out_path = out_dir / f"face_{i}.jpg"
-        cv2.imwrite(str(out_path), cv2.cvtColor(face, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(str(out_path),
+                    cv2.cvtColor(face, cv2.COLOR_RGB2BGR))
         saved.append(out_path)
 
     print(f"Extracted {len(saved)} faces → {out_dir}")
     return saved
 
 
-def _model_input_hw(model: keras.Model) -> tuple[int, int]:
-    """Return (H, W) for the model input, supporting list/tuple input shapes."""
-    ishape = model.input_shape
-    if isinstance(ishape, (list, tuple)) and isinstance(ishape[0], (list, tuple)):
-        # e.g. [(None, 256, 256, 3), ...]
-        H, W = ishape[0][1], ishape[0][2]
-    elif isinstance(ishape, (list, tuple)):
-        # e.g. (None, 256, 256, 3)
-        H, W = ishape[1], ishape[2]
-    else:
-        H = W = 256
-    return int(H), int(W)
-
-
-def get_embedding(img_path: Path) -> np.ndarray:
+def get_embedding(img_path: Path, model_name: str = "Inception") -> np.ndarray:
     """
-    Load image, resize to model's input size, return embedding vector (1D).
-    Keep values as float32 in 0..255 (matches augmentation value_range).
+    Generate a face embedding vector from an image using a deep learning model.
+
+    This function loads an image, preprocesses it to match the model's expected
+    input format, and generates a numerical embedding that represents the face
+    for comparison purposes.
+
+    Args:
+        img_path (Path): Path to the face image file
+        model_name (str): Name of the model to use for embedding generation
+
+    Returns:
+        np.ndarray: Face embedding vector (1D numpy array)
+
+    Raises:
+        ValueError: If the image cannot be read
+
+    Example:
+        >>> embedding = get_embedding(Path("face.jpg"))
+        >>> print(f"Embedding shape: {embedding.shape}")
+        Embedding shape: (512,)
     """
+    model = get_model(model_name)
+
     img_bgr = cv2.imread(str(img_path))
+
     if img_bgr is None:
-        raise RuntimeError(f"Failed to load image: {img_path}")
+        raise ValueError(f"Could not read image from {img_path}")
+
+    # Convert to RGB as expected by the model
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-    H, W = _model_input_hw(embedder)
-    face = cv2.resize(img_rgb, (W, H), interpolation=cv2.INTER_AREA)
+    # Resize to model's expected input dimensions (typically square)
+    _, H, W, _ = model.input_shape
+    face = cv2.resize(img_rgb, (W, H), interpolation=cv2.INTER_CUBIC)
 
-    arr = face.astype("float32")  # keep 0..255
-    arr = np.expand_dims(arr, axis=0)
-    emb = embedder.predict(arr, verbose=0)
-    return np.ravel(emb[0])  # ensure 1D
+    # Normalize pixel values to [0, 1] range
+    face = face.astype("float32") / 255.0
+    # Add batch dimension
+    face = np.expand_dims(face, axis=0)
+
+    # Generate embedding
+    emb = model.predict(face, verbose=0)
+    return emb[0]  # Return first (and only) embedding from batch
 
 
 def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
-    """Compute 1 - cosine_similarity(a, b)."""
-    denom = (np.linalg.norm(a) * np.linalg.norm(b)) + 1e-12
-    return 1.0 - float(np.dot(a, b) / denom)
+    """
+    Calculate the cosine distance between two embedding vectors.
+
+    Cosine distance is defined as 1 - cosine_similarity, where cosine similarity
+    is the dot product of normalized vectors. This metric is commonly used for
+    face verification as it's less sensitive to vector magnitude variations.
+
+    Args:
+        a (np.ndarray): First embedding vector
+        b (np.ndarray): Second embedding vector
+
+    Returns:
+        float: Cosine distance between the vectors (0 = identical, 2 = opposite)
+
+    Note:
+        - Distance of 0 means vectors are identical
+        - Distance of 1 means vectors are orthogonal (90 degrees apart)
+        - Distance of 2 means vectors are opposite (180 degrees apart)
+
+    Example:
+        >>> emb1 = np.array([1, 0, 0])
+        >>> emb2 = np.array([1, 0, 0])
+        >>> distance = cosine_distance(emb1, emb2)
+        >>> print(f"Distance: {distance}")  # Should be close to 0
+    """
+    return 1.0 - np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
 
-# ---------- Single-person verifier (kept for your one-person checks) ----------
 def verify_faces(face_paths: list[Path],
                  person_path: Path,
-                 threshold: float = THRESHOLD) -> Tuple[int, int, float]:
+                 threshold: float = THRESHOLD,
+                 model_name: str = "Inception") -> tuple[int, int]:
     """
-    For each extracted face, compare embedding to the person's embedding.
-    Returns (matches, misses, min_dist).
+    Verify extracted faces against a known person's reference image.
+
+    This function compares each detected face against a reference image of a
+    known person using face embeddings and cosine distance. Faces with distance
+    below the threshold are considered matches.
+
+    Args:
+        face_paths (list[Path]): List of paths to extracted face images
+        person_path (Path): Path to the reference image of the known person
+        threshold (float): Cosine distance threshold for matching (lower = stricter)
+        model_name (str): Name of the embedding model to use
+
+    Returns:
+        tuple[int, int]: (number_of_matches, number_of_non_matches)
+
+    Example:
+        >>> faces = [Path("face_1.jpg"), Path("face_2.jpg")]
+        >>> matches, misses = verify_faces(faces, Path("alice.jpg"))
+        >>> print(f"Found {matches} matches out of {len(faces)} faces")
     """
-    person_emb = get_embedding(person_path)
+    # Get the reference embedding for the known person
+    person_emb = get_embedding(person_path, model_name)
     matches = 0
-    misses  = 0
-    min_dist = float("inf")
+    misses = 0
 
     for p in face_paths:
         start = time.time()
-        face_emb = get_embedding(p)
-        dist     = cosine_distance(face_emb, person_emb)
-        ok       = (dist <= threshold)
-        elapsed  = time.time() - start
-        print(f"  {p.name}: dist={dist:.3f}, match={ok} ({elapsed:.2f}s)")
-        matches += int(ok)
-        misses  += int(not ok)
-        if dist < min_dist:
-            min_dist = dist
+        # Get embedding for the current detected face
+        face_emb = get_embedding(p, model_name)
+        # Calculate similarity using cosine distance
+        dist = cosine_distance(face_emb, person_emb)
+        # Check if the distance is below threshold (indicating a match)
+        is_match = (dist <= threshold)
+        elapsed = time.time() - start
 
-    return matches, misses, min_dist
+        print(f"  {p.name}: dist={dist:.3f}, match={is_match} ({elapsed:.2f}s)")
 
-
-# ---------- New: group classification (multi-person) ----------
-def load_person_embeddings(person_directory: Path) -> List[Tuple[str, np.ndarray]]:
-    """
-    Preload embeddings for all person images in the directory.
-    Returns list of (name_stem, embedding).
-    """
-    people: List[Tuple[str, np.ndarray]] = []
-    for person_file in sorted(os.listdir(person_directory)):
-        person_path = person_directory / person_file
-        if not person_path.is_file():
-            continue
-        name = person_path.stem
-        emb = get_embedding(person_path)
-        people.append((name, emb))
-    return people
-
-
-def classify_faces_against_people(face_paths: list[Path],
-                                  people_embs: List[Tuple[str, np.ndarray]],
-                                  threshold: float = THRESHOLD,
-                                  margin_gap: float = MARGIN_GAP) -> Dict[str, int]:
-    """
-    For each face, pick the best-matching person (lowest distance).
-    Assign that face to the person if: best_dist <= threshold and
-    (optional) the runner-up is at least margin_gap worse.
-    Returns a dict of counts {person_name: votes}.
-    """
-    votes: Dict[str, int] = {}
-
-    # Cache face embeddings so we don't re-run the model N_people times per face
-    face_emb_cache: Dict[Path, np.ndarray] = {}
-    for fp in face_paths:
-        face_emb_cache[fp] = get_embedding(fp)
-
-    for fp, femb in face_emb_cache.items():
-        # Compute distances to all known people
-        dists: List[Tuple[str, float]] = []
-        for name, pemb in people_embs:
-            d = cosine_distance(femb, pemb)
-            dists.append((name, d))
-
-        if not dists:
-            continue
-
-        dists.sort(key=lambda x: x[1])  # ascending distance: best first
-        best_name, best_dist = dists[0]
-
-        # Runner-up margin (optional)
-        margin_ok = True
-        if margin_gap > 0 and len(dists) > 1:
-            second_best_dist = dists[1][1]
-            margin_ok = (second_best_dist - best_dist) >= margin_gap
-
-        print(f"Face {fp.name}: best={best_name} (dist={best_dist:.3f})"
-              + (f", second={dists[1][0]} (Δ={second_best_dist - best_dist:.3f})" if len(dists) > 1 else ""))
-
-        if best_dist <= threshold and margin_ok:
-            votes[best_name] = votes.get(best_name, 0) + 1
+        if is_match:
+            matches += 1
         else:
-            print(f"  -> Face {fp.name} unassigned (dist too high or ambiguous).")
+            misses += 1
 
-    return votes
+    return matches, misses
 
 
 def find_people_in_group_simple(
-    group_img: Path,
-    person_directory: Path,
-    *,
-    verbose: bool = True,
+        group_img: Path,
+        person_directory: Path,
+        *,
+        verbose: bool = True,
+        model_name: str = "Inception"
 ) -> str:
     """
-    Simplified version:
-    - Requires only the group image path and person directory path.
-    - Uses a fixed extract_dir ("extracted_faces" folder near this script).
-    - Returns a JSON string with potentially multiple people.
+    Main function to identify known people in a group photograph.
+
+    This is the primary interface for the face recognition system. It extracts
+    faces from a group image, then compares each face against all known people
+    in the person directory to determine who is present in the photo.
+
+    Args:
+        group_img (Path): Path to the group photograph to analyze
+        person_directory (Path): Directory containing reference images of known people
+        verbose (bool): Whether to print detailed progress information
+        model_name (str): Name of the embedding model to use for recognition
+
+    Returns:
+        str: JSON-formatted string containing the results with structure:
+            {
+                "status": bool/str,           # True for success, "error" for failure
+                "found": list[str],           # Names of people found (filenames without extension)
+                "total_faces": int,           # Total number of faces detected
+                "message": str                # Error message if status is "error"
+            }
+
+    Example:
+        >>> result_json = find_people_in_group_simple(
+        ...     Path("party.jpg"),
+        ...     Path("known_people/")
+        ... )
+        >>> result = json.loads(result_json)
+        >>> print(f"Found: {result['found']}")
+        Found: ['alice', 'bob', 'charlie']
+
+    Workflow:
+        1. Validate input files and directories
+        2. Extract faces from the group image using MTCNN
+        3. For each known person in the directory:
+           a. Generate their reference embedding
+           b. Compare against all detected faces
+           c. If any face matches (distance < threshold), mark as found
+        4. Return JSON results
     """
+    # Create directory for temporarily storing extracted faces
     extract_dir = Path(__file__).resolve().parent / "extracted_faces"
 
-    # Sanity checks
+    # Input validation
     if not group_img.is_file():
-        return json.dumps({"status": False, "message": f"Missing group image: {group_img}"})
+        return json.dumps({
+            "status": "error",
+            "message": f"Missing group image: {group_img}"
+        })
     if not person_directory.is_dir():
-        return json.dumps({"status": False, "message": f"Missing person directory: {person_directory}"})
+        return json.dumps({
+            "status": "error",
+            "message": f"Missing person directory: {person_directory}"
+        })
 
-    # Clear extracts
+    # Clean up any previous extracted faces
     if extract_dir.exists():
-        for f in list(extract_dir.iterdir()):
+        for f in extract_dir.iterdir():
             if f.is_file():
                 f.unlink()
     else:
         extract_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1) Extract faces
+    # Step 1: Extract all faces from the group image
     faces = extract_faces(group_img, extract_dir, MIN_SIZE)
+
+    # If no faces found, return early
+    if not faces:
+        response = {
+            "status": True,
+            "found": [],
+            "total_faces": 0
+        }
+        return json.dumps(response, indent=2)
+
     if verbose:
         print("\n=== Checking each person image ===")
 
-    # 2) Load all person embeddings once
-    people_embs = load_person_embeddings(person_directory)
-
-    # 3) Assign each face to at most one person (top-1 with threshold + optional margin)
-    votes = classify_faces_against_people(faces, people_embs, threshold=THRESHOLD, margin_gap=MARGIN_GAP)
-
-    # 4) Collate found names (anyone with ≥1 assigned face)
-    found_people = sorted([name for name, count in votes.items() if count >= 1])
-
-    if verbose:
-        if found_people:
-            print("\n=> Group result:")
-            for name in found_people:
-                print(f"  - {name}: {votes[name]} face(s)")
-        else:
-            print("\n=> No confident matches in group photo.")
-
-    return json.dumps({
-        "status": True,
-        "found": found_people,
-        "counts": votes,
-        "total_faces": len(faces)
-    }, indent=2)
-
-
-def first_image_in_dir(dir_path: Path, exts=(".jpg", ".jpeg", ".png", ".bmp", ".webp")) -> Optional[Path]:
-    if not dir_path.exists() or not dir_path.is_dir():
-        return None
-    files = sorted(p for p in dir_path.iterdir() if p.is_file() and p.suffix.lower() in exts)
-    return files[0] if files else None
-
-
-if __name__ == "__main__":
-    base_dir   = Path(__file__).resolve().parent
-    group_dir  = base_dir / "GroupPhotoFromFE"
-    person_dir = base_dir / "PeopleFromDataBase"
-
-    group_img = first_image_in_dir(group_dir)
-    if group_img is None:
-        print(f"[!] No group photo found in: {group_dir}")
-        print("    Make sure you ran the endpoint that downloads the latest group photo.")
-        raise SystemExit(1)#!/usr/bin/env python3
-"""
-FaceTrack.py
-
-1) Extract faces from a group image using MTCNN.
-2) Upscale any tiny faces to 112×112.
-3) Classify each extracted face against gallery people using your embedder.
-"""
-import json
-import time
-import os
-from pathlib import Path
-from typing import List, Optional, Tuple, Dict
-
-import cv2
-import numpy as np
-from mtcnn import MTCNN
-import keras
-
-# --- Configuration ---
-MIN_SIZE   = 112      # smallest face side we'll accept
-THRESHOLD  = 0.30     # stricter match threshold (cosine distance)
-MARGIN_GAP = 0.12     # require this gap to runner-up to accept a match
-MODEL_PATH = Path(__file__).resolve().parent / "inception_model.keras"  # your saved Keras 3 model
-
-# Input preprocessing expected by the embedder:
-#   "raw255"   -> keep 0..255
-#   "scale01"  -> scale to 0..1
-#   "inception"-> scale to [-1,1] (typical for Inception-family models)
-PREPROC    = "inception"
-
-# ---------- Model loading (Keras 3) ----------
-def _merge_two_feature_maps_if_needed(base: keras.Model) -> keras.Model:
-    """If the loaded model outputs two 4D tensors (N,H,W,C),
-    merge them -> GAP -> Dense head. (Kept for compatibility)"""
-    outs = base.outputs if isinstance(base.outputs, (list, tuple)) else [base.outputs]
-    if len(outs) == 2 and getattr(outs[0].shape, "rank", None) == 4:
-        merged = keras.layers.Average(name="merge_avg")(outs)
-        x = keras.layers.GlobalAveragePooling2D(name="gap")(merged)
-        # Example head (won't be used by the embedder, but we keep this for parity)
-        x = keras.layers.Dense(128, activation="relu", name="dense")(x)
-        x = keras.layers.BatchNormalization(name="bn1")(x)
-        x = keras.layers.Dense(64, activation="relu", name="dense_1")(x)
-        x = keras.layers.BatchNormalization(name="bn2")(x)
-        x = keras.layers.Dense(32, activation="relu", name="dense_2")(x)
-        x = keras.layers.BatchNormalization(name="bn3")(x)
-        x = keras.layers.Dropout(0.3, name="dropout")(x)
-        out = keras.layers.Dense(5, activation="softmax", name="dense_3")(x)
-        return keras.Model(inputs=base.inputs, outputs=out, name="patched_model")
-    return base
-
-def load_face_model() -> keras.Model:
-    base = keras.saving.load_model(str(MODEL_PATH), compile=False, safe_mode=False)
-    return _merge_two_feature_maps_if_needed(base)
-
-# Load your embedding model once (must output an embedding vector, not softmax!)
-from .model_loader import load_embedder
-embedder: keras.Model = load_embedder()
-
-# Build the face detector once
-detector = MTCNN()
-
-# ---------- Preprocess helper ----------
-def _preprocess_for_embedder(x: np.ndarray) -> np.ndarray:
-    if PREPROC == "raw255":
-        return x.astype("float32")
-    if PREPROC == "scale01":
-        return (x.astype("float32")) / 255.0
-    # default: Inception-style [-1, 1]
-    return (x.astype("float32") / 127.5) - 1.0
-
-
-def extract_faces(group_path: Path,
-                  out_dir: Path,
-                  min_size: int = MIN_SIZE) -> list[Path]:
-    """
-    - Runs MTCNN on the group image
-    - Saves each crop to out_dir/face_{i}.jpg
-    - Upscales any face below min_size
-    - Returns a list of saved face Paths
-    """
-    out_dir.mkdir(exist_ok=True)
-    img_bgr = cv2.imread(str(group_path))
-    if img_bgr is None:
-        return []
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-
-    detections = detector.detect_faces(img_rgb)
-    saved: list[Path] = []
-
-    for i, det in enumerate(detections):
-        x, y, w, h = det.get("box", [0, 0, 0, 0])
-        x, y = max(0, x), max(0, y)
-        face = img_rgb[y:y+h, x:x+w]
-        if face.size == 0:
-            continue
-
-        # Upscale if too small
-        if face.shape[0] < min_size or face.shape[1] < min_size:
-            face = cv2.resize(face, (min_size, min_size), interpolation=cv2.INTER_CUBIC)
-
-        out_path = out_dir / f"face_{i}.jpg"
-        cv2.imwrite(str(out_path), cv2.cvtColor(face, cv2.COLOR_RGB2BGR))
-        saved.append(out_path)
-
-    print(f"Extracted {len(saved)} faces → {out_dir}")
-    return saved
-
-
-def _model_input_hw(model: keras.Model) -> tuple[int, int]:
-    """Return (H, W) for the model input, supporting list/tuple input shapes."""
-    ishape = model.input_shape
-    if isinstance(ishape, (list, tuple)) and isinstance(ishape[0], (list, tuple)):
-        # e.g. [(None, 256, 256, 3), ...]
-        H, W = ishape[0][1], ishape[0][2]
-    elif isinstance(ishape, (list, tuple)):
-        # e.g. (None, 256, 256, 3)
-        H, W = ishape[1], ishape[2]
-    else:
-        H = W = 256
-    return int(H), int(W)
-
-
-def get_embedding(img_path: Path) -> np.ndarray:
-    """
-    Load image, resize to model's input size, return L2-normalized embedding vector (1D).
-    """
-    img_bgr = cv2.imread(str(img_path))
-    if img_bgr is None:
-        raise RuntimeError(f"Failed to load image: {img_path}")
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-
-    H, W = _model_input_hw(embedder)
-    face = cv2.resize(img_rgb, (W, H), interpolation=cv2.INTER_AREA)
-
-    arr = _preprocess_for_embedder(face)
-    arr = np.expand_dims(arr, axis=0)
-    emb = embedder.predict(arr, verbose=0)
-
-    v = np.ravel(emb[0]).astype("float32")
-    # L2-normalize (important for cosine distance)
-    v /= (np.linalg.norm(v) + 1e-12)
-    return v
-
-
-def cosine_distance(a: np.ndarray, b: np.ndarray) -> float:
-    """Compute 1 - cosine_similarity(a, b) assuming L2-normalized vectors."""
-    # After L2-normalization, cosine_similarity = dot(a,b)
-    return 1.0 - float(np.dot(a, b))
-
-
-# ---------- Single-person verifier (useful for one-person checks) ----------
-def verify_faces(face_paths: list[Path],
-                 person_path: Path,
-                 threshold: float = THRESHOLD) -> Tuple[int, int, float]:
-    """
-    For each extracted face, compare embedding to the person's embedding.
-    Returns (matches, misses, min_dist).
-    """
-    person_emb = get_embedding(person_path)
-    matches = 0
-    misses  = 0
-    min_dist = float("inf")
-
-    for p in face_paths:
-        start = time.time()
-        face_emb = get_embedding(p)
-        dist     = cosine_distance(face_emb, person_emb)
-        ok       = (dist <= threshold)
-        elapsed  = time.time() - start
-        print(f"  {p.name}: dist={dist:.3f}, match={ok} ({elapsed:.2f}s)")
-        matches += int(ok)
-        misses  += int(not ok)
-        if dist < min_dist:
-            min_dist = dist
-
-    return matches, misses, min_dist
-
-
-# ---------- Group classification (multi-person) ----------
-def load_person_embeddings(person_directory: Path) -> List[Tuple[str, np.ndarray]]:
-    """
-    Preload embeddings for all person images in the directory.
-    Returns list of (name_stem, embedding).
-    """
-    people: List[Tuple[str, np.ndarray]] = []
+    # Step 2: Compare extracted faces against each known person
+    found_people: List[str] = []
     for person_file in sorted(os.listdir(person_directory)):
         person_path = person_directory / person_file
         if not person_path.is_file():
             continue
-        name = person_path.stem
-        emb = get_embedding(person_path)
-        people.append((name, emb))
-    return people
 
+        # Use filename without extension as the person's name
+        name_out = person_path.stem
 
-def classify_faces_against_people(face_paths: list[Path],
-                                  people_embs: List[Tuple[str, np.ndarray]],
-                                  threshold: float = THRESHOLD,
-                                  margin_gap: float = MARGIN_GAP) -> Dict[str, int]:
-    """
-    For each face, pick the best-matching person (lowest distance).
-    Assign that face to the person if: best_dist <= threshold and
-    (optional) the runner-up is at least margin_gap worse.
-    Returns a dict of counts {person_name: votes}.
-    """
-    votes: Dict[str, int] = {}
-    if not people_embs or not face_paths:
-        return votes
+        if verbose:
+            print(f"\n-- {person_file} --")
 
-    # Cache face embeddings (avoid N_people * N_faces predictions)
-    face_emb_cache: Dict[Path, np.ndarray] = {}
-    for fp in face_paths:
-        face_emb_cache[fp] = get_embedding(fp)
+        # Verify if this person appears in any of the extracted faces
+        matches, misses = verify_faces(faces, person_path,
+                                       threshold=THRESHOLD,
+                                       model_name=model_name)
 
-    for fp, femb in face_emb_cache.items():
-        dists: List[Tuple[str, float]] = []
-        for name, pemb in people_embs:
-            d = cosine_distance(femb, pemb)
-            dists.append((name, d))
-
-        dists.sort(key=lambda x: x[1])  # ascending distance: best first
-        best_name, best_dist = dists[0]
-
-        # Runner-up margin (optional)
-        margin_ok = True
-        if margin_gap > 0 and len(dists) > 1:
-            second_best_dist = dists[1][1]
-            margin_ok = (second_best_dist - best_dist) >= margin_gap
-
-        # DEBUG: show top-3 per face
-        top_show = min(3, len(dists))
-        print(f"[DIST] {fp.name}: " + ", ".join([f"{nm}:{dist:.3f}" for nm, dist in dists[:top_show]]))
-
-        if best_dist <= threshold and margin_ok:
-            votes[best_name] = votes.get(best_name, 0) + 1
+        # If any face matched this person, add them to found list
+        if matches > 0:
+            if verbose:
+                print(f"=> **{person_file} FOUND** ({matches} of {len(faces)} faces matched)")
+            found_people.append(name_out)
         else:
-            print(f"  -> Face {fp.name} unassigned (dist={best_dist:.3f}, margin_ok={margin_ok}).")
+            if verbose:
+                print(f"=> {person_file} NOT found")
 
-    return votes
-
-
-def find_people_in_group_simple(
-    group_img: Path,
-    person_directory: Path,
-    *,
-    verbose: bool = True,
-) -> str:
-    """
-    Simplified version:
-    - Only needs the group image path and person directory path.
-    - Uses a fixed extract_dir ("extracted_faces" folder near this script).
-    - Returns a JSON string with potentially multiple people.
-    """
-    extract_dir = Path(__file__).resolve().parent / "extracted_faces"
-
-    # Sanity checks
-    if not group_img.is_file():
-        return json.dumps({"status": False, "message": f"Missing group image: {group_img}"})
-    if not person_directory.is_dir():
-        return json.dumps({"status": False, "message": f"Missing person directory: {person_directory}"})
-
-    # Clear extracts
-    if extract_dir.exists():
-        for f in list(extract_dir.iterdir()):
-            if f.is_file():
-                f.unlink()
-    else:
-        extract_dir.mkdir(parents=True, exist_ok=True)
-
-    # 1) Extract faces
-    faces = extract_faces(group_img, extract_dir, MIN_SIZE)
-    if verbose:
-        print("\n=== Checking each person image ===")
-
-    # 2) Load all person embeddings once
-    people_embs = load_person_embeddings(person_directory)
-
-    # 3) Assign each face to at most one person (top-1 with threshold + optional margin)
-    votes = classify_faces_against_people(faces, people_embs, threshold=THRESHOLD, margin_gap=MARGIN_GAP)
-
-    # 4) Collate found names (anyone with ≥1 assigned face)
-    found_people = sorted([name for name, count in votes.items() if count >= 1])
-
-    if verbose:
-        if found_people:
-            print("\n=> Group result:")
-            for name in found_people:
-                print(f"  - {name}: {votes[name]} face(s)")
-        else:
-            print("\n=> No confident matches in group photo.")
-
-    return json.dumps({
+    # Prepare final response
+    response = {
         "status": True,
         "found": found_people,
-        "counts": votes,
         "total_faces": len(faces)
-    }, indent=2)
-
-
-def first_image_in_dir(dir_path: Path, exts=(".jpg", ".jpeg", ".png", ".bmp", ".webp")) -> Optional[Path]:
-    if not dir_path.exists() or not dir_path.is_dir():
-        return None
-    files = sorted(p for p in dir_path.iterdir() if p.is_file() and p.suffix.lower() in exts)
-    return files[0] if files else None
+    }
+    return json.dumps(response, indent=2)
 
 
 if __name__ == "__main__":
-    base_dir   = Path(__file__).resolve().parent
-    group_dir  = base_dir / "GroupPhotoFromFE"
-    person_dir = base_dir / "PeopleFromDataBase"
+    """
+    Example usage and demonstration of the FaceTrack module.
 
-    group_img = first_image_in_dir(group_dir)
-    if group_img is None:
-        print(f"[!] No group photo found in: {group_dir}")
-        print("    Make sure you ran the endpoint that downloads the latest group photo.")
-        raise SystemExit(1)
+    This script demonstrates how to use the face recognition system with
+    the provided test images (Avengers characters). It shows the typical
+    workflow for identifying people in a group photo.
+    """
+    # Setup paths for demonstration
+    base_dir = Path(__file__).resolve().parent
+    group_img = base_dir / "avengersGroup" / "robertTest2.jpg"
+    person_dir = base_dir / "avengersTest"
 
-    print(f"Using group image: {group_img}")
+    # Run the face recognition system
     result_json = find_people_in_group_simple(group_img, person_dir)
     result = json.loads(result_json)
 
+    # Display results
     print("\n=== Summary: People detected in group photo ===")
-    if result.get("status") and result.get("found"):
+    if result["status"] and result["found"]:
         for name in result["found"]:
-            print(f"- {name} (faces: {result['counts'][name]})")
-    else:
-        print("No known persons detected.")
-
-
-    print(f"Using group image: {group_img}")
-    result_json = find_people_in_group_simple(group_img, person_dir)
-    result = json.loads(result_json)
-
-    print("\n=== Summary: People detected in group photo ===")
-    if result.get("status") and result.get("found"):
-        for name in result["found"]:
-            print(f"- {name} (faces: {result['counts'][name]})")
+            print(f"- {name}")
     else:
         print("No known persons detected.")
