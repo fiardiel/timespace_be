@@ -27,7 +27,7 @@ import numpy as np
 import cv2
 
 # Import the module under test
-import FaceTrack
+from . import FaceTrack
 
 
 class TestUtilityFunctions(unittest.TestCase):
