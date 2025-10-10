@@ -18,6 +18,7 @@ Author: TIME-Space Machine Learning Team
 import unittest
 from unittest.mock import Mock, patch, MagicMock, mock_open
 import os
+import sys
 import json
 import tempfile
 import shutil
@@ -26,8 +27,11 @@ from pathlib import Path
 import numpy as np
 import cv2
 
+# Add the directory containing this file to Python path
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 # Import the module under test
-from . import FaceTrack
+import FaceTrack
 
 
 class TestUtilityFunctions(unittest.TestCase):
