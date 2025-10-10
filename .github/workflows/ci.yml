@@ -29,6 +29,8 @@ jobs:
           python -m pip install --upgrade pip
           # if you have a requirements.txt at repo root:
           pip install -r requirements.txt
+          # Install pytest for testing
+          pip install pytest
           # otherwise, list them directly:
           # pip install opencv-python-headless pytest mtcnn deepface
 
