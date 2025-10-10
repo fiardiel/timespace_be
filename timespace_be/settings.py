@@ -115,8 +115,15 @@ TEMPLATES = [
     },
 ]
 
+CORS_ALLOW_CREDENTIALS=True
+
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
+    "https://timelab-fe.vercel.app"
+]
+
+CSRF_TRUSTED_ORIGINS = [
+    "https://timelab-fe.vercel.app"
 ]
 
 WSGI_APPLICATION = 'timespace_be.wsgi.application'
